@@ -1,7 +1,7 @@
 //+------------------------------------------------------------------+
 //|  YSM-Gomati_HuntTheHunters.mq5                                 |
 //|  ARCHITECT : Yogeshwar Singh Maitry                             |
-//|  SYSTEM    : YSM-GOMATI 6.0 / Hunt The Hunters — FINAL         |
+//|  SYSTEM    : YSM-GOMATI 6.01 / Hunt The Hunters — FINAL        |
 //|                                                                  |
 //|  CORE PHILOSOPHY                                                 |
 //|  Institutions hunt retail stop orders clustered above swing     |
@@ -17,12 +17,11 @@
 //|                                                                  |
 //|  SETUP QUALITY SCORING (only A+ setups trade)                  |
 //|    Pool type bonus : Asian/PDH-PDL = +3,  Swing = +1           |
-//|    HTF EMA aligned : +2                                         |
-//|    Premium/Discount: +1                                         |
-//|    Session killzone: +1                                         |
 //|    Order Block avail: +1                                        |
 //|    FVG avail        : +1                                        |
-//|    Maximum score    : 9   Default minimum: 3                   |
+//|    Maximum score    : 5   Default minimum: 3                   |
+//|    NOTE: HTF/PD/Session bonuses removed (B12 fix) — Gate1      |
+//|    already enforces them; double-counting made score 1-4 dead  |
 //|                                                                  |
 //|  ENTRY MODES                                                    |
 //|    CHoCH market order / OB limit / FVG limit / CHoCH fallback  |
@@ -38,7 +37,7 @@
 //|    Trailing stop (pip-based, activates at configurable R)       |
 //|    Daily drawdown and profit cap                                 |
 //|                                                                  |
-//|  ZERO DAMAGE — ALL 13 AUDIT BUGS FIXED                         |
+//|  ZERO DAMAGE — ALL 15 AUDIT BUGS FIXED                         |
 //|  B01-B09: swing detection, FVG, OrderOpen, limit fill,         |
 //|           HUD, OB/FVG fallback, SL validation, pool capacity,  |
 //|           pool swept-marking (B09 = critical filter-reject bug) |
@@ -46,9 +45,11 @@
 //|  BUG-A: lot sizing guard (tickVal/tickSize zero protection)     |
 //|  BUG-B: Asian range per-bar GMT conversion on init seeding      |
 //|  B-LIMIT: limit price validation uses correct ask/bid reference |
+//|  B12: quality gate double-counted hard-gate filters (dead gate) |
+//|  B13: Asian seed trigger hour==8 → >=8 (H2/H4 bar skip risk)  |
 //+------------------------------------------------------------------+
 #property copyright "YSM-Gomati Architecture"
-#property version   "6.00"
+#property version   "6.01"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -419,8 +420,11 @@ void UpdateAsianRange() {
       if(bL<g_AsianL) g_AsianL=bL;
    }
 
-   // At London open (08:00 GMT) add Asian H/L as premium pools
-   if(UseAsianRange && !g_AsianSeeded && t.hour==8
+   // At London open (>=08:00 GMT) add Asian H/L as premium pools
+   // B13 FIX: was t.hour==8 — on H2/H3/H4 charts no bar opens at exactly
+   // 08:00 GMT so the window was silently skipped for the whole day.
+   // g_AsianSeeded flag already prevents any double-seeding on >= check.
+   if(UseAsianRange && !g_AsianSeeded && t.hour>=8
       && g_AsianH>0 && g_AsianL<DBL_MAX){
       AddPool(g_AsianH, true,  POOL_ASIAN, today);
       AddPool(g_AsianL, false, POOL_ASIAN, today);
@@ -452,28 +456,27 @@ void UpdatePrevDayHL() {
 
 //=======================================================================
 //  SETUP QUALITY SCORE
-//  Rates the setup on a 0–9 scale. Higher = institutional alignment.
+//  Rates the setup on a 0–5 scale. Higher = institutional alignment.
+//  B12 FIX: max was 9 but HTF/PD/Session bonuses were guaranteed-true after Gate1.
 //=======================================================================
 int CalcQuality(int poolIdx, bool isBull) {
    int q=0;
-   // Pool type bonus
+   // Pool type bonus (1–3)
    switch(g_Pools[poolIdx].type){
       case POOL_ASIAN:   q+=3; break;
       case POOL_PDH_PDL: q+=3; break;
       default:           q+=1; break;
    }
-   // HTF EMA aligned
-   if(PassesHTFFilter(isBull)) q+=2;
-   // Premium / Discount zone
-   if(PassesPDFilter(isBull))  q+=1;
-   // Killzone timing
-   if(PassesSessionFilter())   q+=1;
-   // OB or FVG available (checked quickly without building full OB/FVG)
+   // B12 FIX: HTF/PD/Session bonuses removed.
+   // Gate1 (PassesAllFilters) already hard-rejects if those are enabled+failing.
+   // Re-awarding them here double-counted guaranteed-true conditions and made
+   // MinQualityScore values 1-4 functionally dead when filters were enabled.
+   // OB or FVG available (+1 each) — max score now 5
    OrderBlock ob=FindOrderBlock(isBull,1);
    FVG        fvg=FindFVG(isBull,1);
    if(ob.valid)  q+=1;
    if(fvg.valid) q+=1;
-   return q;
+   return q; // max = 5 (premium pool + OB + FVG)
 }
 
 //=======================================================================
@@ -839,7 +842,7 @@ void UpdateHUD(const string status) {
    string dir="", chStr="";
    if(g_Setup.active){
       dir  =g_Setup.isBull?"BULL (expecting UP)":"BEAR (expecting DOWN)";
-      chStr=StringFormat("CHoCH gate: %s   Quality: %d/9",
+      chStr=StringFormat("CHoCH gate: %s   Quality: %d/5",
             DoubleToString(g_Setup.chochLevel,_Digits),g_Setup.qualityScore)
            +(g_Setup.limitModeFallback?" [CHoCH fallback]":"");
    }
@@ -976,7 +979,7 @@ int OnInit() {
       if(h_ATR==INVALID_HANDLE) Print("WARNING: ATR handle failed");
    }
 
-   Print("══ YSM HUNT THE HUNTERS v6.00 ══  Architect: ",YSM_OWNER);
+   Print("══ YSM HUNT THE HUNTERS v6.01 ══  Architect: ",YSM_OWNER);
    Print("Entry:",EnumToString(EntryMode),
          " Sess:",EnumToString(SessionMode),
          " HTF:",HTF_Filter?"ON":"OFF",
