@@ -776,7 +776,7 @@ bool SetupInvalidated() {
 //=======================================================================
 void ManagePositions() {
    for(int i=g_ManagedCount-1;i>=0;i--){
-      ManagedPos &mp=g_Managed[i];
+      ManagedPos mp=g_Managed[i];
       if(!PositionSelectByTicket(mp.ticket)){ RemoveManagedAt(i); continue; }
 
       double ask=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
@@ -823,6 +823,7 @@ void ManagePositions() {
             }
          }
       }
+      g_Managed[i]=mp;
    }
 }
 
