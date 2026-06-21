@@ -1,7 +1,7 @@
 //+------------------------------------------------------------------+
 //|  YSM-Gomati_HuntTheHunters.mq5                                 |
 //|  ARCHITECT : Yogeshwar Singh Maitry                             |
-//|  SYSTEM    : YSM-GOMATI 6.01 / Hunt The Hunters — FINAL        |
+//|  SYSTEM    : YSM-GOMATI 6.03 / Hunt The Hunters — FINAL        |
 //|                                                                  |
 //|  CORE PHILOSOPHY                                                 |
 //|  Institutions hunt retail stop orders clustered above swing     |
@@ -37,7 +37,7 @@
 //|    Trailing stop (pip-based, activates at configurable R)       |
 //|    Daily drawdown and profit cap                                 |
 //|                                                                  |
-//|  ZERO DAMAGE — ALL 15 AUDIT BUGS FIXED                         |
+//|  ZERO DAMAGE — ALL 18 AUDIT BUGS FIXED                         |
 //|  B01-B09: swing detection, FVG, OrderOpen, limit fill,         |
 //|           HUD, OB/FVG fallback, SL validation, pool capacity,  |
 //|           pool swept-marking (B09 = critical filter-reject bug) |
@@ -47,9 +47,13 @@
 //|  B-LIMIT: limit price validation uses correct ask/bid reference |
 //|  B12: quality gate double-counted hard-gate filters (dead gate) |
 //|  B13: Asian seed trigger hour==8 → >=8 (H2/H4 bar skip risk)  |
+//|  B15: MaxPools unguarded → ArraySize-1=-1 crash on 0/neg input |
+//|  B16: Asian reset keyed off GMT date not broker D1 rollover    |
+//|  B17: init-seed didn't stamp GMT day-key → B16 reset wiped it  |
+//|       on first OnBar() after restart past 08:00 GMT            |
 //+------------------------------------------------------------------+
 #property copyright "YSM-Gomati Architecture"
-#property version   "6.01"
+#property version   "6.03"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -104,7 +108,7 @@ input double SweepMaxPips    = 30.0;
 input double MaxSpreadPips   = 3.0;
 
 input group "=== SETUP QUALITY GATE ==="
-input int    MinQualityScore = 3;     // Min score to enter (0=off). Max possible=9.
+input int    MinQualityScore = 3;     // Min score to enter (0=off). Max possible=5.
 input double MaxSL_Pips      = 25.0;  // Skip if SL > N pips (0=off; protects vs wide SL)
 
 input group "=== ENTRY MODE ==="
@@ -224,6 +228,7 @@ datetime      g_DayStartTime  = 0;
 
 // Asian Range state (resets at 00:00 GMT)
 datetime      g_AsianDate     = 0;
+int           g_AsianGmtDayKey= -1;   // B16: GMT calendar date key (yyyymmdd), broker-offset-agnostic
 double        g_AsianH        = 0.0;
 double        g_AsianL        = DBL_MAX;
 bool          g_AsianSeeded   = false; // premium pools added this day?
@@ -407,7 +412,13 @@ void UpdateAsianRange() {
    MqlDateTime t; TimeGMT(t);
    datetime today=iTime(_Symbol,PERIOD_D1,0);
 
-   if(today!=g_AsianDate){
+   // B16 FIX: reset keyed off true GMT calendar date, not broker D1 rollover.
+   // Broker D1 rolls over at broker midnight (e.g. GMT-4 broker = 04:00 GMT).
+   // That fires mid-Asian-session, wiping 4h of accumulated H/L — range truncated.
+   // GMT day key (yyyymmdd from TimeGMT) always resets at 00:00 GMT exactly.
+   int gmtDayKey=t.year*10000+t.mon*100+t.day;
+   if(gmtDayKey!=g_AsianGmtDayKey){
+      g_AsianGmtDayKey = gmtDayKey;
       g_AsianDate  = today;
       g_AsianH     = 0.0;
       g_AsianL     = DBL_MAX;
@@ -694,7 +705,7 @@ bool BuildSetup(int poolIdx) {
    g_Setup.qualityScore    = quality;
 
    Print("Gate Hunter | ▶ SETUP  bull=",isBull,
-         " quality=",quality,"/9",
+         " quality=",quality,"/5",
          " pool=",EnumToString(g_Pools[poolIdx].type),
          " SL=",DoubleToString(sl,_Digits),
          " CHoCH=",DoubleToString(choch,_Digits),
@@ -960,7 +971,10 @@ int OnInit() {
    g_Trade.SetExpertMagicNumber(YSM_MAGIC);
    g_Trade.SetTypeFillingBySymbol(_Symbol);
 
-   ArrayResize(g_Pools,MaxPools*2);
+   // B15 FIX: clamp MaxPools — unguarded 0/negative input caused
+   // ArraySize(g_Pools)-1 = -1 in AddPool() → negative index write → crash.
+   int v_MaxPools=(int)MathMax(5,MaxPools);
+   ArrayResize(g_Pools,v_MaxPools*2);
    g_PoolCount=0; g_ManagedCount=0;
    ZeroMemory(g_Setup);
    g_Setup.active=false;
@@ -979,7 +993,7 @@ int OnInit() {
       if(h_ATR==INVALID_HANDLE) Print("WARNING: ATR handle failed");
    }
 
-   Print("══ YSM HUNT THE HUNTERS v6.01 ══  Architect: ",YSM_OWNER);
+   Print("══ YSM HUNT THE HUNTERS v6.03 ══  Architect: ",YSM_OWNER);
    Print("Entry:",EnumToString(EntryMode),
          " Sess:",EnumToString(SessionMode),
          " HTF:",HTF_Filter?"ON":"OFF",
@@ -1013,6 +1027,12 @@ int OnInit() {
    // Previous code called TimeGMT() once for current time (not per-bar) — all today's
    // bars were included, making the Asian range cover London+NY too (far too wide).
    MqlDateTime now; TimeGMT(now);
+   // B17 FIX: stamp GMT day-key here unconditionally so the first OnBar()
+   // call to UpdateAsianRange() sees a matching key and does NOT fire the
+   // B16 reset block — which would wipe whatever this init block seeds below.
+   // Without this, any restart after 08:00 GMT silently loses Asian pools
+   // for the rest of the day (accumulation window already passed, re-seed fails).
+   g_AsianGmtDayKey = now.year*10000+now.mon*100+now.day;
    if(now.hour>=8 && UseAsianRange){
       datetime todayBase=iTime(_Symbol,PERIOD_D1,0);
       // GMT offset: broker server time vs true GMT
